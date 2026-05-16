@@ -10,7 +10,7 @@ namespace BfresMcUpdaterTest;
 internal static class Program
 {
     private const string InputFileName  = "ModdedTestFile.bfres.mc";
-    private const string OutputFileName = "ModdedTestFile.out.bfres";
+    private const string OutputFileName = "ModdedTestFile.out.bfres.mc";
     private const string RomfsDumpRoot = @"F:\TOTK\1.4.3";
 
     private static int Main()
@@ -50,15 +50,13 @@ internal sealed class RomfsDump(string root)
     public byte[]? TryRead(string relativePath)
     {
         var norm = relativePath.TrimStart('/').Replace('\\', '/');
-        foreach (var suffix in new[] { norm, Path.Combine("romfs", norm).Replace('\\', '/') }) {
-            var combined = Path.GetFullPath(Path.Combine(_root, suffix.Replace('/', Path.DirectorySeparatorChar)));
-            if (!combined.StartsWith(_root, StringComparison.OrdinalIgnoreCase))
-                continue;
-            if (File.Exists(combined))
-                return File.ReadAllBytes(combined);
+        var combined = Path.GetFullPath(Path.Combine(_root, norm.Replace('/', Path.DirectorySeparatorChar)));
+        
+        if (!combined.StartsWith(_root, StringComparison.OrdinalIgnoreCase)) {
+            return null;
         }
-
-        return null;
+        
+        return !File.Exists(combined) ? null : File.ReadAllBytes(combined);
     }
 }
 
@@ -92,45 +90,73 @@ internal sealed class BfresMcProcessor
 
     public byte[] ProcessBfresMc(byte[] mcData) => ProcessBfresMc(new ArraySegment<byte>(mcData));
 
-    public byte[] ProcessBfresMc(ArraySegment<byte> mcData)
+    private byte[] ProcessBfresMc(ArraySegment<byte> mcData)
     {
         LoadStringCache();
 
         byte[] bfresData;
-        try { bfresData = DecompressMcpk(mcData); }
-        catch { return mcData.ToArray(); }
+        
+        try {
+            bfresData = DecompressMcpk(mcData);
+        }
+        catch {
+            return mcData.ToArray();
+        }
 
         ResFile resFile;
-        try { resFile = new ResFile(new MemoryStream(bfresData)); }
-        catch { return mcData.ToArray(); }
-
-        if (!TryGetShaderProductVersion(out var userVersion))
+        
+        try {
+            resFile = new ResFile(new MemoryStream(bfresData));
+        }
+        catch {
             return mcData.ToArray();
+        }
+
+        if (!TryGetShaderProductVersion(out var userVersion)) {
+            return mcData.ToArray();
+        }
 
         var anyApplied = false;
         foreach (var model in resFile.Models.Values) {
-            if (model is null) continue;
+            if (model is null) {
+                continue;
+            }
+            
             foreach (var mat in model.Materials.Values) {
-                if (mat is null) continue;
+                if (mat is null) {
+                    continue;
+                }
+                
                 foreach (var opt in Options) {
-                    if (!TryGetOptionValue(mat, opt, out var cur)) continue;
+                    if (!TryGetOptionValue(mat, opt, out var cur)) {
+                        continue;
+                    }
+                    
                     var row = FindDiffRow(opt, cur);
-                    if (row is null) continue;
+                    
+                    if (row is null) {
+                        continue;
+                    }
+                    
                     var next = ValueForVersion(row, userVersion);
-                    if (next == cur) continue;
+                    
+                    if (next == cur) {
+                        continue;
+                    }
+                    
                     SetOptionValue(mat, opt, next);
                     anyApplied = true;
                 }
             }
         }
 
-        if (!anyApplied)
+        if (!anyApplied) {
             return mcData.ToArray();
+        }
 
         using var ms = new MemoryStream();
         resFile.Save(ms);
-        // return CompressMcpk(ms.ToArray());
-        return ms.ToArray();
+        return CompressMcpk(ms.ToArray());
     }
 
     private bool TryGetShaderProductVersion(out int version)
@@ -138,10 +164,13 @@ internal sealed class BfresMcProcessor
         foreach (var v in _materialShaderVersions) {
             var name = v.ToString(CultureInfo.InvariantCulture);
             var probe = _rom.TryRead($"Shader/material.Product.{name}.product.Nin_NX_NVN.bfsha.zs");
-            if (probe is { Length: > 0 }) {
-                version = v;
-                return true;
+            
+            if (probe is not { Length: > 0 }) {
+                continue;
             }
+            
+            version = v;
+            return true;
         }
 
         version = 0;
@@ -150,29 +179,28 @@ internal sealed class BfresMcProcessor
 
     private Dictionary<int, long>? FindDiffRow(string optionName, long value)
     {
-        if (!_materialDiff.TryGetValue(optionName, out var rows)) return null;
-        foreach (var row in rows) {
-            if (row.ContainsValue(value))
-                return row;
-        }
-        return null;
+        return !_materialDiff.TryGetValue(optionName, out var rows)
+            ? null
+            : rows.FirstOrDefault(row => row.ContainsValue(value));
     }
 
     private static long ValueForVersion(Dictionary<int, long> row, int userVersion)
     {
-        if (row.TryGetValue(userVersion, out var x))
+        if (row.TryGetValue(userVersion, out var x)) {
             return x;
+        }
+        
         var best = int.MinValue;
-        foreach (var k in row.Keys) {
-            if (k <= userVersion && k > best)
-                best = k;
+        
+        foreach (var k in row.Keys.Where(k => k <= userVersion && k > best)) {
+            best = k;
         }
-        if (best != int.MinValue)
+        
+        if (best != int.MinValue) {
             return row[best];
-        best = int.MaxValue;
-        foreach (var k in row.Keys) {
-            if (k < best) best = k;
         }
+        
+        best = row.Keys.Prepend(int.MaxValue).Min();
         return row[best];
     }
 
@@ -180,11 +208,16 @@ internal sealed class BfresMcProcessor
     {
         value = 0;
         var opts = mat.ShaderAssign?.ShaderOptions;
-        if (opts is not { Count: > 0 }) return false;
+
+        if (opts is not { Count: > 0 }) {
+            return false;
+        }
+        
         foreach (var kv in opts) {
             if (string.Equals(kv.Key, optionName, StringComparison.OrdinalIgnoreCase))
                 return TryParseOptionString(kv.Value?.String, out value);
         }
+        
         return false;
     }
 
@@ -192,32 +225,44 @@ internal sealed class BfresMcProcessor
     {
         value = 0;
         s = s?.Trim();
+        
         if (string.IsNullOrEmpty(s) || s.Equals("<Default Value>", StringComparison.OrdinalIgnoreCase))
             return false;
+        
         if (s.Equals("True", StringComparison.OrdinalIgnoreCase)) {
             value = 1;
             return true;
         }
-        if (s.Equals("False", StringComparison.OrdinalIgnoreCase))
+        
+        if (s.Equals("False", StringComparison.OrdinalIgnoreCase)) {
             return true;
+        }
+        
         if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
             && ulong.TryParse(s.AsSpan(2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var hx)) {
             value = unchecked((long)hx);
             return true;
         }
-        if (long.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out value))
-            return true;
-        if (ulong.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out var ul) && ul <= long.MaxValue) {
-            value = (long)ul;
+        if (long.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out value)) {
             return true;
         }
-        return false;
+        
+        if (!ulong.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out var ul) || ul > long.MaxValue) {
+            return false;
+        }
+        
+        value = (long)ul;
+        return true;
     }
 
     private static void SetOptionValue(Material mat, string optionName, long value)
     {
         var opts = mat.ShaderAssign?.ShaderOptions;
-        if (opts is null) return;
+        
+        if (opts is null) {
+            return;
+        }
+        
         foreach (var kv in opts) {
             if (string.Equals(kv.Key, optionName, StringComparison.OrdinalIgnoreCase)) {
                 kv.Value.String = value.ToString(CultureInfo.InvariantCulture);
@@ -266,8 +311,12 @@ internal sealed class BfresMcProcessor
         var output = new byte[(int)decompSize];
         using var dec = new Decompressor();
         dec.SetParameter(ZSTD_dParameter.ZSTD_d_experimentalParam1, (int)ZSTD_format_e.ZSTD_f_zstd1_magicless);
-        try { dec.Unwrap(data[HeaderSize..], output); }
+        
+        try {
+            dec.Unwrap(data[HeaderSize..], output);
+        }
         catch (ZstdException) { }
+        
         return output;
     }
 
